@@ -1,0 +1,167 @@
+# Code for Halleck Vega, S., Patuelli, R., van Voorn, G, and Weinans, E. (2025),
+"Spatial early warning signals to assess economic resilience," iScience.
+
+library(autoplotly)
+library(earlywarnings)
+library(forecast)
+library(GADMTools)
+library(ggfortify)
+library(ggplot2)
+library(maptools)
+library(matrixStats)
+library(RColorBrewer)
+library(readxl)
+library(rgdal)
+library(rgeos)
+library(spdep)
+library(splines)
+library(stlplus)
+library(tidyquant)
+library(timeSeries)
+library(tseries)
+
+# loads map
+load("FRA_adm3.RData")
+ls()
+summary(gadm)
+# plot(gadm)
+france.map = unionSpatialPolygons(gadm, gadm$NAME_2)
+summary(france.map)
+row.names(france.map)
+colours = rev(bpy.colors(n = 5, cutoff.tails = 0.3))
+
+# reads the data
+datamatrix = read.delim("french_data2020.txt", header = TRUE, row.names=NULL)[,-c(1:2)]
+datamatrix_diff = datamatrix[-c(1:4),] - datamatrix[-c((dim(datamatrix)[1] - 3):dim(datamatrix)[1]),]
+# resort alphabetically
+datamatrix_o = with(datamatrix, datamatrix[,order(colnames(datamatrix))])
+datamatrix_o = cbind(c(1:dim(datamatrix_o)[1]), datamatrix_o)
+colnames(datamatrix_o)[1] = "time"
+datamatrix_diff_o = with(datamatrix_diff, datamatrix_diff[,order(colnames(datamatrix_diff))])
+datamatrix_diff_o = cbind(c(1:dim(datamatrix_diff_o)[1]), datamatrix_diff_o)
+colnames(datamatrix_diff_o)[1] = "time"
+u_mean = colMeans(datamatrix_o[, -1], na.rm = TRUE)
+u_diff_mean = colMeans(datamatrix_diff_o[, -1], na.rm = TRUE)
+
+# Creates first-order contiguity neighbours set
+coords = coordinates(france.map)
+france.nb.cont1 = poly2nb(france.map, row.names = row.names(france.map), queen = TRUE, snap = sqrt(.Machine$double.eps))
+summary(france.nb.cont1)
+france.listc.cont1 = nb2listw(france.nb.cont1, style = "C")
+france.listw.cont1 = nb2listw(france.nb.cont1, style = "W")
+
+# PCA and MI
+datamatrixPCs = read.delim("PCs_frenchdata.txt", header = FALSE, row.names=NULL, sep = ',')
+datamatrixPCs = with(datamatrixPCs, datamatrixPCs[,order(colnames(datamatrix))])
+datamatrixPCs = cbind(c(1:111), datamatrixPCs)
+colnames(datamatrixPCs)[1] = "time"
+
+MIs = matrix(0, dim(datamatrixPCs[, -1])[1], 1)
+for (i in 0:(dim(datamatrixPCs[, -1])[1] - 1)) {
+  MI = moran.test(as.numeric(datamatrixPCs[(i + 1), -1]), france.listc.cont1, randomisation = TRUE, na.action = na.exclude, zero.policy = TRUE)
+  MIs[[(i + 1)]] = MI$estimate[1]
+}
+mean(MIs)
+tsMIs_PCs = ts(MIs, start = c(1992, 1), frequency = 4, names = "MI of PCs")
+tiff(file = "FRANCE_MI_update.tif", bg = "transparent", width = 3600, height = 3600, res = 600, pointsize = 12, compression = "lzw")
+plot(tsMIs_PCs, main = "France")
+abline(h = -1 / dim(datamatrixPCs)[2], lty = 2)
+dev.off()
+cat(tsMIs_PCs, file = "France_MI_PCs.txt")
+
+# early warning signals (a la Dakos et al. 2012)
+Avg_reg_urates = rowMeans(datamatrix)
+
+#'Base' case
+EWS_out = generic_ews(Avg_reg_urates, winsize = 50, detrending ='gaussian', bandwidth = NULL, span = NULL,
+                      degree = NULL, logtransform = FALSE, interpolate = FALSE,
+                      AR_n = FALSE, powerspectrum = FALSE)
+
+# EWS_out = generic_ews(Avg_reg_urates, winsize = 10, detrending ='gaussian', bandwidth = NULL, span = NULL,
+#                       degree = NULL, logtransform = FALSE, interpolate = FALSE,
+#                       AR_n = FALSE, powerspectrum = FALSE)
+
+
+# spatial early warning signals (a la Kefi et al. 2014)
+
+# computes MI of u_mean and u_diff_mean
+moran.test(u_mean, france.listc.cont1, randomisation = TRUE)
+moran.test(u_diff_mean, france.listc.cont1, randomisation = TRUE)
+# recomputes calculating the average of the quarterly MI
+MIs = matrix(0, dim(datamatrix_o)[1], 1)
+for (i in 0:(dim(datamatrix_o)[1] - 1)) {
+ 	MI = moran.test(as.numeric(datamatrix_o[(i + 1), -1]), france.listc.cont1, randomisation = TRUE, na.action = na.exclude, zero.policy = TRUE)
+ 	MIs[[(i + 1)]] = MI$estimate[1]
+}
+mean(MIs)
+tsMIs = ts(MIs, start = c(1982, 1), frequency = 4, names = "MI of unemployment rates")
+tiff(file = "FRANCE_MI_update.tif", bg = "transparent", width = 3600, height = 3600, res = 600, pointsize = 12, compression = "lzw")
+plot(tsMIs, main = "France")
+abline(h = -1/dim(datamatrix_o[, -1])[2], lty = 2)
+dev.off()
+
+MIs_sig = matrix(0, dim(datamatrix_o)[1], 1)
+for (i in 0:(dim(datamatrix_o)[1] - 1)) {
+ 	MI = moran.test(as.numeric(datamatrix_o[(i + 1), -1]), france.listc.cont1, randomisation = TRUE, na.action = na.exclude, zero.policy = TRUE)
+ 	MIs_sig[[(i + 1)]] = MI$p.value
+}
+tsMIs_sig = ts(MIs_sig, start = c(1982, 1), frequency = 4, names = "p-value of MI of unemployment rates")
+plot(tsMIs_sig)
+plot(cbind(tsMIs, tsMIs_sig))
+
+# correlation
+
+datamatrix[is.na(datamatrix)] <- 0
+
+urates_median <-apply(datamatrix,1,FUN=median)
+tsUs_median = ts(urates_median, start = c(1982, 1), end = c(2019, 2), frequency = 4, names = "Evolution of median regional unemployment rates")
+plot(tsUs_median)
+
+urates_mean <-apply(datamatrix,1,FUN=mean)
+tsUs_mean = ts(urates_mean, start = c(1982, 1), end = c(2019, 2), frequency = 4, names = "Evolution of mean regional unemployment rates")
+tiff(file = "FRANCE_meanregU.tif", bg = "transparent", width = 3600, height = 3600, res = 600, pointsize = 12, compression = "lzw")
+plot(tsUs_mean, main="France", ylab="Average regional unemployment rate")
+dev.off()
+
+urates_sd <-apply(datamatrix,1,FUN=sd)
+tsUs_sd = ts(urates_sd, start = c(1982, 1), end = c(2019, 2), frequency = 4, names = "Evolution of standard deviation regional unemployment rates")
+tiff(file = "FRANCE_sdregU.tif", bg = "transparent", width = 3600, height = 3600, res = 600, pointsize = 12, compression = "lzw")
+plot(tsUs_sd, main="France", ylab="S.d. regional unemployment rate")
+dev.off()
+
+plot(cbind(tsMIs,tsUs_mean), main="Dynamics of SA and unemployment for France")
+
+corrs <- runCor(tsMIs,tsUs)
+plot(corrs)
+
+cor(tsMIs, tsUs)
+cor(tsMIs, tsUs_mean)
+cor.test(tsMIs, tsUs_sd)
+cor.test(tsUs_mean, tsUs_sd)
+
+cor.test(tsMIs, tsUs_mean)
+
+tiff(file = "FRANCE_qplot.tif", bg = "transparent", width = 3600, height = 3600, res = 600, pointsize = 12, compression = "lzw")
+qplot(tsMIs, tsUs_mean, main="France", xlab="MI of unemployment rates", ylab = "Average of regional unemployment rates")
+dev.off()
+
+
+# recomputes calculating the average of the quarterly MI
+MIs = matrix(0, (dim(datamatrix_o)[1] - 4), 1)
+for (i in 0:(dim(datamatrix_o)[1] - 5)) {
+ 	MI = moran.test(as.numeric(datamatrix_diff_o[(i + 1), -1]), france.listc.cont1, randomisation = TRUE, na.action = na.exclude, zero.policy = TRUE)
+ 	MIs[[(i + 1)]] = MI$estimate[1]
+}
+mean(MIs, na.rm = TRUE)
+tsMIs = ts(MIs, start = c(1983, 1), frequency = 4, names = "MI of one-year-difference unemployment rates")
+plot(tsMIs)
+abline(h = -1/dim(datamatrix_o[, -1])[2], lty = 2)
+
+# map of average unemployment
+old.par = par(mar = c(0, 0, 0, 0))
+plot(france.map, col = colours[findInterval(u_mean, brks <- round(quantile(u_mean, probs = seq(0, 1, 0.2)), digits = 2), all.inside = TRUE)])
+legend("bottom", legend = leglabs(brks), fill = colours, bty = "n", ncol = 5, title = "Average unemployment rates (MI = 0.322)")
+# map of average unemployment one-year differences
+old.par = par(mar = c(0, 0, 0, 0))
+plot(france.map, col = colours[findInterval(u_diff_mean, brks <- round(quantile(u_diff_mean, probs = seq(0, 1, 0.2)), digits = 2), all.inside = TRUE)])
+legend("bottom", legend = leglabs(brks), fill = colours, bty = "n", ncol = 5, title = "Average 1-year differences (MI = 0.304)")
